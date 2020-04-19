@@ -31,18 +31,18 @@ def threshold_scores(scores, percentile_include, absolute):
 
 # agglomerative sweep - black out selected pixels from before and resweep over the entire image
 def agglomerate(model, batch, percentile_include, method, sweep_dim,
-                label, num_iters=5, subtract=True, absolute=True, device='cuda'):
+                label, num_iters=5, subtract=True, absolute=True, device='cuda', inputs):
     # get original text and score
     text_orig = batch.text.data.cpu().numpy()
     score_orig = score_funcs.get_scores_1d(batch, model, method, label, only_one=True,
-                                           score_orig=None, text_orig=text_orig, subtract=subtract, device=device)[0]
+                                           score_orig=None, text_orig=text_orig, subtract=subtract, device=device, inputs)[0]
 
     # get scores
     texts = tiling.gen_tiles(text_orig, method=method, sweep_dim=sweep_dim)
     texts = texts.transpose()
     batch.text.data = torch.LongTensor(texts).to(device)
     scores = score_funcs.get_scores_1d(batch, model, method, label, only_one=False,
-                                       score_orig=score_orig, text_orig=text_orig, subtract=subtract, device=device)
+                                       score_orig=score_orig, text_orig=text_orig, subtract=subtract, device=device, inputs)
 
     # threshold scores
     mask = threshold_scores(scores, percentile_include, absolute=absolute)

@@ -86,39 +86,56 @@ def ig_scores_2d(model, im_torch, num_classes=10, im_size=28, sweep_dim=1, ind=N
 def ig_scores_1d(batch, model, inputs, device='cuda'):
     '''Compute integrated gradients scores (1D input)
     '''
-    for p in model.parameters():
-        if p.grad is not None:
-            p.grad.data.zero_()
-    M = 1000
-    criterion = torch.nn.L1Loss(size_average=False)
-    mult_grid = np.array(range(M)) / (M - 1)
-    word_vecs = model.embed(batch.text).data
-    baseline_text = copy.deepcopy(batch.text)
-    baseline_text.data[:, :] = inputs.vocab.stoi['.']
-    baseline = model.embed(baseline_text).data
-    input_vecs = torch.Tensor(baseline.size(0), M, baseline.size(2)).to(device)
-    for i, prop in enumerate(mult_grid):
-        input_vecs[:, i, :] = baseline + (prop * (word_vecs - baseline)).to(device)
+    if isinstance(batch,Tensor):
+        text = batch.data[:, 0]
+        words = [inputs.vocab.itos[i] for i in text]
+        x = model.embed(batch)
+        len_batch = len(words)
+    else:
+        text = batch.text.data[:, 0]
+        words = [inputs.vocab.itos[i] for i in text]
+        x = model.embed(batch.text)
+        len_batch = len(batch.text)
+    
+    T = x.size(0)
+    word_vecs = [word_vec.cpu() for word_vec in x]
 
-    input_vecs = input_vecs
+    x_dash = torch.zeros_like(x)
+    sum_grad = None
+    grad_array = None
+    x_array = None
 
-    hidden = (torch.zeros(1, M, model.hidden_dim).to(device),
-              torch.zeros(1, M, model.hidden_dim).to(device))
-    lstm_out, hidden = model.lstm(input_vecs, hidden)
-    logits = F.softmax(model.hidden_to_label(lstm_out[-1]))[:, 0]
-    loss = criterion(logits, torch.zeros(M).to(device))
-    loss.backward()
-    imps = input_vecs.grad.mean(1).data * (word_vecs[:, 0] - baseline[:, 0])
-    zero_pred = logits[0]
-    scores = imps.sum(1)
-    #     for i in range(sent_len):
-    #         print(ig_scores[i], text_orig[i])
-    # Sanity check: this should be small-ish
-    #     print((logits[-1] - zero_pred) - ig_scores.sum())
-    return scores.cpu().numpy()
+    # get Predicted label
+    with torch.no_grad():
+        model.eval()
+        pred=torch.argmax(model(x))
+    model.train()
+
+    # ig
+    for k in range(T):
+        model.zero_grad()
+        step_input = x_dash + k * (x - x_dash) / T
+        step_output = model(step_input)
+        step_pred = torch.argmax(step_output)
+        step_grad = torch.autograd.grad(step_output[0][pred.item()], x)[0]
+        if sum_grad is None:
+            sum_grad = step_grad
+            grad_array = step_grad
+            x_array = step_input
+        else:
+            sum_grad += step_grad
+            grad_array = torch.cat([grad_array, step_grad])
+            x_array = torch.cat([x_array, step_input])
+
+    sum_grad = sum_grad / T
+    sum_grad = sum_grad * (x - x_dash)
+    sum_grad = sum_grad.sum(dim=2)
+
+    relevances = sum_grad.detach().cpu().numpy()
+    return relevances
 
 
-def get_scores_1d(batch, model, method, label, only_one, score_orig, text_orig, subtract=False, device='cuda'):
+def get_scores_1d(batch, model, method, label, only_one, score_orig, text_orig, subtract=False, device='cuda', inputs):
     '''Return attribution scores for 1D input
     Params
     ------
@@ -140,6 +157,11 @@ def get_scores_1d(batch, model, method, label, only_one, score_orig, text_orig, 
             batch.text.data = torch.LongTensor(text_orig).to(device)
             scores = np.array([cd_text(batch, model, start=starts[i], stop=stops[i])
                                for i in range(len(starts))])
+    if method == 'ig':
+        if only_one:
+            scores = np.expand_dims(np.sum(ig_scores_1d(batch, model, inputs))) # using sum for ig
+        else:
+            scores = ig_scores_1d(batch, model, inputs)
     else:
         scores = model(batch).data.cpu().numpy()
         if method == 'occlusion' and not only_one:
